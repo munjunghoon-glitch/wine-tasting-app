@@ -431,29 +431,6 @@ function RecommendCard({ rec, index }: { rec: RecommendedWine; index: number }) 
         {rec.description}
       </p>
 
-      {rec.shopName && (
-        rec.shopUrl ? (
-          <a
-            href={rec.shopUrl}
-            target="_blank"
-            rel="noopener noreferrer"
-            style={{
-              fontFamily: 'var(--font-noto-sans-kr)',
-              fontSize: '12px',
-              color: '#c9a96e',
-              textDecoration: 'none',
-              borderBottom: '1px solid #5a3a2a',
-              paddingBottom: '1px',
-            }}
-          >
-            🛒 {rec.shopName} 에서 구매 →
-          </a>
-        ) : (
-          <p style={{ fontFamily: 'var(--font-noto-sans-kr)', fontSize: '12px', color: '#7a5c6a', margin: 0 }}>
-            🛒 {rec.shopName}
-          </p>
-        )
-      )}
     </div>
   );
 }

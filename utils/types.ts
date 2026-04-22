@@ -18,8 +18,6 @@ export interface CuratedWine {
   country: string;
   style: string;
   price: string;
-  shopName: string;       // 판매처 이름 (예: 와인앤모어, 이마트)
-  shopUrl?: string;       // 구매 링크 (선택)
   description: string;
 }
 
@@ -54,8 +52,6 @@ export interface RecommendedWine {
   grape: string;
   country: string;
   price: string;
-  shopName?: string;
-  shopUrl?: string;
   description: string;
   source: 'curated' | 'ai';  // 출처 표시용
 }
