@@ -147,7 +147,7 @@ function TastingContent() {
           color: '#7a5c6a',
           marginTop: '4px',
         }}>
-          {session.title} · {session.subtitle}
+          {session.title}
         </p>
       </header>
 
