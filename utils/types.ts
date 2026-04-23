@@ -24,6 +24,7 @@ export interface TastingData {
   body?: string;
   tannin?: string;
   feeling: string;
+  rating?: number;
   isCustomWine?: boolean;
   customWineName?: string;
 }
