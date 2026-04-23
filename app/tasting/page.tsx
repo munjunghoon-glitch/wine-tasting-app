@@ -1,9 +1,9 @@
 'use client';
 
-import { useState, Suspense } from 'react';
+import { useState, useEffect, Suspense } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { getSession } from '@/data/sessions';
-import type { Wine, WineType, TastingData, WineProfile, WineRecommendations, WineRecommendItem } from '@/utils/types';
+import type { Wine, WineType, TastingData, WineProfile, WineRecommendations, WineRecommendItem, Session } from '@/utils/types';
 
 // ── 상수 ──────────────────────────────────────────────────────
 
@@ -45,8 +45,9 @@ type TabKey = 'by_country' | 'by_grape' | 'by_producer' | 'by_price';
 function TastingContent() {
   const searchParams = useSearchParams();
   const sessionId    = searchParams.get('session') || 'default';
-  const session      = getSession(sessionId);
 
+  const [session, setSession]                 = useState<Session | null>(null);
+  const [sessionLoading, setSessionLoading]   = useState(true);
   const [step, setStep]                       = useState<Step>('select');
   const [selectedWine, setSelectedWine]       = useState<Wine | null>(null);
   const [isCustom, setIsCustom]               = useState(false);
@@ -91,6 +92,21 @@ function TastingContent() {
       setField('flavors', [...cur, f]);
     }
   }
+
+  useEffect(() => {
+    setSessionLoading(true);
+    fetch(`/api/sessions?session=${sessionId}`)
+      .then(r => r.json())
+      .then(data => {
+        if (data.success && data.session) {
+          setSession(data.session);
+        } else {
+          setSession(getSession(sessionId));
+        }
+      })
+      .catch(() => setSession(getSession(sessionId)))
+      .finally(() => setSessionLoading(false));
+  }, [sessionId]);
 
   function toggleRating(star: number) {
     setTasting(prev => ({ ...prev, rating: prev.rating === star ? undefined : star }));
@@ -248,7 +264,19 @@ function TastingContent() {
     setRecsError('');
   }
 
-  // ── 로딩 화면 ─────────────────────────────────────────────
+  // ── 세션 로딩 화면 ────────────────────────────────────────
+  if (sessionLoading || !session) {
+    return (
+      <div style={{ minHeight: '100vh', background: '#0a0608', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center' }}>
+        <div style={{ fontSize: '48px' }}>🍷</div>
+        <p style={{ fontFamily: 'var(--font-noto-sans-kr)', fontSize: '14px', color: '#b09880', marginTop: '20px' }}>
+          로딩 중...
+        </p>
+      </div>
+    );
+  }
+
+  // ── 프로파일 분석 로딩 화면 ───────────────────────────────
   if (loadingProfile) {
     return (
       <div style={{ minHeight: '100vh', background: '#0a0608', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center' }}>
