@@ -7,51 +7,52 @@ export interface Wine {
   country: string;
   grape: string;
   desc: string;
-  // 관리자 등록 추천 와인 (방법1)
-  curatedRecs?: CuratedWine[];
-}
-
-export interface CuratedWine {
-  name: string;
-  type: WineType;
-  grape: string;
-  country: string;
-  style: string;
-  price: string;
-  description: string;
 }
 
 export interface Session {
   sessionId: string;
   title: string;
-  subtitle: string;
   wineList: Wine[];
 }
 
 export interface TastingData {
   type: WineType;
   flavors: string[];
-  // 샴페인/스파클링
   bubble?: string;
   finish?: string;
-  // 화이트/레드 공통
   acidity?: string;
   body?: string;
-  // 레드 전용
   tannin?: string;
-  // 공통
   feeling: string;
-  // 기타 입력 여부
   isCustomWine?: boolean;
   customWineName?: string;
 }
 
-export interface RecommendedWine {
-  name?: string;
-  style: string;
-  grape: string;
+export interface WineProfile {
+  title: string;
+  aroma: string;
+  structure: string;
+  pairing: string;
+  persona: string;
+}
+
+export interface WineRecommendItem {
+  name: string;
   country: string;
+  grape?: string;
+  producer?: string;
   price: string;
-  description: string;
-  source: 'curated' | 'ai';  // 출처 표시용
+  reason: string;
+}
+
+export interface WineRecommendations {
+  by_country: WineRecommendItem[];
+  by_grape: WineRecommendItem[];
+  by_producer: WineRecommendItem[];
+  by_price: WineRecommendItem[];
+}
+
+export interface AIAnalysisResult {
+  profile: WineProfile;
+  recommendations: WineRecommendations;
 }
