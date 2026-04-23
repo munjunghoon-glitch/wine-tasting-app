@@ -3,7 +3,7 @@
 import { useState, Suspense } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { getSession } from '@/data/sessions';
-import type { Wine, WineType, TastingData, AIAnalysisResult, WineRecommendItem } from '@/utils/types';
+import type { Wine, WineType, TastingData, AIAnalysisResult, WineProfile, WineRecommendItem } from '@/utils/types';
 
 // ── 상수 ──────────────────────────────────────────────────────
 
@@ -26,14 +26,8 @@ const ACIDITY_OPTIONS = ['낮음', '보통', '높음'];
 const BODY_OPTIONS    = ['가벼움', '미디엄', '묵직함'];
 const TANNIN_OPTIONS  = ['부드러움', '보통', '강함'];
 const FEELING_OPTIONS = [
-  '상큼하고 가벼움',
-  '풍부하고 진함',
-  '우아하고 섬세함',
-  '달콤하고 부드러움',
-  '묵직하고 강렬함',
-  '신선하고 생동감 있음',
-  '복잡하고 흥미로움',
-  '크리미하고 부드러움',
+  '상큼하고 가벼움', '풍부하고 진함', '우아하고 섬세함', '달콤하고 부드러움',
+  '묵직하고 강렬함', '신선하고 생동감 있음', '복잡하고 흥미로움', '크리미하고 부드러움',
 ];
 
 const TABS = [
@@ -43,8 +37,22 @@ const TABS = [
   { key: 'by_price'    as const, label: '💰 가격대별' },
 ];
 
-type Step = 'select' | 'tasting' | 'profile' | 'recommend';
+const PROFILE_SECTIONS: { field: keyof WineProfile; label: string }[] = [
+  { field: 'aroma',     label: '향 취향' },
+  { field: 'structure', label: '구조감' },
+  { field: 'pairing',   label: '어울리는 상황' },
+];
+
+type Step   = 'select' | 'tasting' | 'profile' | 'recommend';
 type TabKey = 'by_country' | 'by_grape' | 'by_producer' | 'by_price';
+
+// JSON 스트림에서 완성된 필드 추출
+function extractJsonField(text: string, field: string): string | null {
+  const regex = new RegExp(`"${field}"\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)"`)
+  const match = text.match(regex);
+  if (!match) return null;
+  return match[1].replace(/\\n/g, '\n').replace(/\\"/g, '"');
+}
 
 // ── 메인 ──────────────────────────────────────────────────────
 
@@ -53,18 +61,25 @@ function TastingContent() {
   const sessionId    = searchParams.get('session') || 'default';
   const session      = getSession(sessionId);
 
-  const [step, setStep]                   = useState<Step>('select');
-  const [selectedWine, setSelectedWine]   = useState<Wine | null>(null);
-  const [isCustom, setIsCustom]           = useState(false);
-  const [customName, setCustomName]       = useState('');
-  const [customType, setCustomType]       = useState<WineType>('red');
-  const [tasting, setTasting]             = useState<Partial<TastingData>>({ flavors: [] });
-  const [loading, setLoading]             = useState(false);
-  const [error, setError]                 = useState('');
+  const [step, setStep]                     = useState<Step>('select');
+  const [selectedWine, setSelectedWine]     = useState<Wine | null>(null);
+  const [isCustom, setIsCustom]             = useState(false);
+  const [customName, setCustomName]         = useState('');
+  const [customType, setCustomType]         = useState<WineType>('red');
+  const [tasting, setTasting]               = useState<Partial<TastingData>>({ flavors: [] });
+  const [loading, setLoading]               = useState(false);
+  const [isStreaming, setIsStreaming]        = useState(false);
+  const [partialProfile, setPartialProfile] = useState<Partial<WineProfile>>({});
   const [analysisResult, setAnalysisResult] = useState<AIAnalysisResult | null>(null);
-  const [activeTab, setActiveTab]         = useState<TabKey>('by_country');
+  const [activeTab, setActiveTab]           = useState<TabKey>('by_country');
+  const [error, setError]                   = useState('');
 
   const activeType: WineType = isCustom ? customType : (selectedWine?.type ?? 'red');
+
+  // 프로필 표시용: 스트리밍 중엔 partialProfile, 완료 후엔 analysisResult
+  const currentProfile: Partial<WineProfile> = isStreaming
+    ? partialProfile
+    : (analysisResult?.profile ?? {});
 
   function handleSelectWine(wine: Wine) {
     setSelectedWine(wine);
@@ -101,11 +116,13 @@ function TastingContent() {
     }
     setError('');
     setLoading(true);
+    setPartialProfile({});
+    setAnalysisResult(null);
 
     const wineName = isCustom ? (customName || '알 수 없는 와인') : (selectedWine?.name ?? '');
 
     try {
-      const res = await fetch('/api/ai-recommend', {
+      const response = await fetch('/api/ai-recommend', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -121,15 +138,53 @@ function TastingContent() {
           },
         }),
       });
-      const data = await res.json();
-      if (!data.success) throw new Error(data.error);
-      setAnalysisResult(data.result);
-      setActiveTab('by_country');
-      setStep('profile');
-    } catch {
-      setError('분석 중 오류가 발생했습니다. 다시 시도해주세요.');
-    } finally {
+
+      if (!response.ok || !response.body) throw new Error('API 오류');
+
+      // 연결 성립 → 스트리밍 뷰로 전환
       setLoading(false);
+      setIsStreaming(true);
+      setStep('profile');
+
+      const reader  = response.body.getReader();
+      const decoder = new TextDecoder();
+      let accumulated = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        accumulated += decoder.decode(value, { stream: true });
+
+        // 완성된 필드 실시간 추출
+        const partial: Partial<WineProfile> = {};
+        for (const { field } of PROFILE_SECTIONS) {
+          const val = extractJsonField(accumulated, field);
+          if (val) partial[field] = val;
+        }
+        const persona = extractJsonField(accumulated, 'persona');
+        const title   = extractJsonField(accumulated, 'title');
+        if (persona) partial.persona = persona;
+        if (title)   partial.title   = title;
+        setPartialProfile(partial);
+      }
+
+      // 스트림 완료 → 전체 JSON 파싱
+      const cleaned   = accumulated.replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
+      const jsonMatch = cleaned.match(/\{[\s\S]*\}/);
+      if (!jsonMatch) throw new Error('JSON 파싱 실패');
+
+      const result = JSON.parse(jsonMatch[0]) as AIAnalysisResult;
+      setAnalysisResult(result);
+      setActiveTab('by_country');
+      setIsStreaming(false);
+
+    } catch (e) {
+      console.error(e);
+      setLoading(false);
+      setIsStreaming(false);
+      setStep('tasting');
+      setError('분석 중 오류가 발생했습니다. 다시 시도해주세요.');
     }
   }
 
@@ -139,46 +194,29 @@ function TastingContent() {
     setIsCustom(false);
     setCustomName('');
     setTasting({ flavors: [] });
+    setPartialProfile({});
     setAnalysisResult(null);
     setActiveTab('by_country');
+    setIsStreaming(false);
     setError('');
   }
 
-  // ── 로딩 화면 ──────────────────────────────────────────────
+  // ── 로딩 화면 (API 연결 대기) ─────────────────────────────────
   if (loading) {
     return (
       <div style={{
-        minHeight: '100vh',
-        background: '#0a0608',
-        display: 'flex',
-        flexDirection: 'column',
-        alignItems: 'center',
-        justifyContent: 'center',
-        color: '#e8ddd4',
+        minHeight: '100vh', background: '#0a0608',
+        display: 'flex', flexDirection: 'column',
+        alignItems: 'center', justifyContent: 'center',
       }}>
         <style>{`
-          @keyframes pulse {
-            0%, 100% { transform: scale(1); opacity: 1; }
-            50% { transform: scale(1.25); opacity: 0.6; }
-          }
+          @keyframes pulse { 0%,100%{transform:scale(1);opacity:1} 50%{transform:scale(1.25);opacity:.6} }
         `}</style>
-        <div style={{ fontSize: '64px', animation: 'pulse 2s ease-in-out infinite' }}>🍷</div>
-        <p style={{
-          fontFamily: 'var(--font-cormorant)',
-          fontSize: '20px',
-          color: '#c9a96e',
-          marginTop: '28px',
-          letterSpacing: '0.04em',
-          textAlign: 'center',
-        }}>
+        <div style={{ fontSize: '60px', animation: 'pulse 2s ease-in-out infinite' }}>🍷</div>
+        <p style={{ fontFamily: 'var(--font-cormorant)', fontSize: '20px', color: '#c9a96e', marginTop: '28px', letterSpacing: '0.04em' }}>
           소믈리에가 당신의 취향을 분석 중입니다...
         </p>
-        <p style={{
-          fontFamily: 'var(--font-noto-sans-kr)',
-          fontSize: '13px',
-          color: '#7a5c6a',
-          marginTop: '10px',
-        }}>
+        <p style={{ fontFamily: 'var(--font-noto-sans-kr)', fontSize: '13px', color: '#7a5c6a', marginTop: '10px' }}>
           잠시만 기다려 주세요
         </p>
       </div>
@@ -187,16 +225,16 @@ function TastingContent() {
 
   return (
     <div style={{ minHeight: '100vh', background: '#0a0608', color: '#e8ddd4' }}>
+      {/* CSS 애니메이션 */}
+      <style>{`
+        @keyframes fadeIn { from{opacity:0;transform:translateY(6px)} to{opacity:1;transform:translateY(0)} }
+        @keyframes shimmer { 0%{background-position:200% 0} 100%{background-position:-200% 0} }
+        @keyframes blink { 0%,100%{opacity:1} 50%{opacity:.3} }
+      `}</style>
+
       {/* 헤더 */}
       <header style={{ borderBottom: '1px solid rgba(201,169,110,0.2)', padding: '20px 16px', textAlign: 'center' }}>
-        <h1 style={{
-          fontFamily: 'var(--font-cormorant)',
-          fontSize: 'clamp(22px, 5vw, 32px)',
-          fontWeight: 300,
-          letterSpacing: '0.08em',
-          color: '#c9a96e',
-          margin: 0,
-        }}>
+        <h1 style={{ fontFamily: 'var(--font-cormorant)', fontSize: 'clamp(22px,5vw,32px)', fontWeight: 300, letterSpacing: '0.08em', color: '#c9a96e', margin: 0 }}>
           Wine Tasting
         </h1>
         <p style={{ fontFamily: 'var(--font-noto-sans-kr)', fontSize: '12px', color: '#7a5c6a', marginTop: '4px' }}>
@@ -217,41 +255,17 @@ function TastingContent() {
                 <button
                   key={wine.id}
                   onClick={() => handleSelectWine(wine)}
-                  style={{
-                    background: 'rgba(255,255,255,0.03)',
-                    border: '1px solid rgba(201,169,110,0.2)',
-                    borderRadius: '12px',
-                    padding: '16px',
-                    textAlign: 'left',
-                    cursor: 'pointer',
-                    width: '100%',
-                    transition: 'border-color 0.2s',
-                  }}
+                  style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(201,169,110,0.2)', borderRadius: '12px', padding: '16px', textAlign: 'left', cursor: 'pointer', width: '100%', transition: 'border-color 0.2s' }}
                   onMouseEnter={e => (e.currentTarget.style.borderColor = '#c9a96e')}
                   onMouseLeave={e => (e.currentTarget.style.borderColor = 'rgba(201,169,110,0.2)')}
                 >
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '8px' }}>
                     <div>
-                      <p style={{ fontFamily: 'var(--font-cormorant)', fontSize: '17px', color: '#e8ddd4', margin: 0 }}>
-                        {wine.name}
-                      </p>
-                      <p style={{ fontFamily: 'var(--font-noto-sans-kr)', fontSize: '12px', color: '#7a5c6a', margin: '4px 0 0' }}>
-                        {wine.country} · {wine.grape}
-                      </p>
-                      <p style={{ fontFamily: 'var(--font-noto-sans-kr)', fontSize: '12px', color: '#9a7a6a', margin: '2px 0 0' }}>
-                        {wine.desc}
-                      </p>
+                      <p style={{ fontFamily: 'var(--font-cormorant)', fontSize: '17px', color: '#e8ddd4', margin: 0 }}>{wine.name}</p>
+                      <p style={{ fontFamily: 'var(--font-noto-sans-kr)', fontSize: '12px', color: '#7a5c6a', margin: '4px 0 0' }}>{wine.country} · {wine.grape}</p>
+                      <p style={{ fontFamily: 'var(--font-noto-sans-kr)', fontSize: '12px', color: '#9a7a6a', margin: '2px 0 0' }}>{wine.desc}</p>
                     </div>
-                    <span style={{
-                      fontFamily: 'var(--font-noto-sans-kr)',
-                      fontSize: '11px',
-                      background: 'rgba(201,169,110,0.12)',
-                      color: '#c9a96e',
-                      borderRadius: '20px',
-                      padding: '2px 10px',
-                      whiteSpace: 'nowrap',
-                      flexShrink: 0,
-                    }}>
+                    <span style={{ fontFamily: 'var(--font-noto-sans-kr)', fontSize: '11px', background: 'rgba(201,169,110,0.12)', color: '#c9a96e', borderRadius: '20px', padding: '2px 10px', whiteSpace: 'nowrap', flexShrink: 0 }}>
                       {WINE_TYPE_LABEL[wine.type]}
                     </span>
                   </div>
@@ -259,42 +273,22 @@ function TastingContent() {
               ))}
 
               {/* 기타 직접 입력 */}
-              <div style={{
-                background: 'rgba(255,255,255,0.03)',
-                border: '1px solid rgba(201,169,110,0.2)',
-                borderRadius: '12px',
-                padding: '16px',
-              }}>
-                <p style={{ fontFamily: 'var(--font-noto-sans-kr)', fontSize: '14px', color: '#e8ddd4', margin: '0 0 12px' }}>
-                  ✏️ 기타 직접 입력
-                </p>
+              <div style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(201,169,110,0.2)', borderRadius: '12px', padding: '16px' }}>
+                <p style={{ fontFamily: 'var(--font-noto-sans-kr)', fontSize: '14px', color: '#e8ddd4', margin: '0 0 12px' }}>✏️ 기타 직접 입력</p>
                 <input
-                  type="text"
-                  value={customName}
+                  type="text" value={customName}
                   onChange={e => setCustomName(e.target.value)}
                   placeholder="와인 이름을 입력하세요"
                   style={inputStyle}
                 />
                 <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', marginTop: '10px' }}>
                   {(['champagne', 'sparkling', 'white', 'red'] as WineType[]).map(t => (
-                    <button
-                      key={t}
-                      onClick={() => setCustomType(t)}
-                      style={{
-                        ...chipStyle,
-                        background: customType === t ? '#c9a96e' : 'rgba(201,169,110,0.1)',
-                        color:      customType === t ? '#0a0608' : '#9a7a6a',
-                      }}
-                    >
+                    <button key={t} onClick={() => setCustomType(t)} style={{ ...chipStyle, background: customType === t ? '#c9a96e' : 'rgba(201,169,110,0.1)', color: customType === t ? '#0a0608' : '#9a7a6a' }}>
                       {WINE_TYPE_LABEL[t]}
                     </button>
                   ))}
                 </div>
-                <button
-                  onClick={handleSelectCustom}
-                  disabled={!customName.trim()}
-                  style={{ ...primaryBtn, marginTop: '12px', opacity: customName.trim() ? 1 : 0.4 }}
-                >
+                <button onClick={handleSelectCustom} disabled={!customName.trim()} style={{ ...primaryBtn, marginTop: '12px', opacity: customName.trim() ? 1 : 0.4 }}>
                   테이스팅 시작 →
                 </button>
               </div>
@@ -317,7 +311,6 @@ function TastingContent() {
               </div>
             </div>
 
-            {/* 향 체크박스 */}
             <Card>
               <FieldLabel>어떤 향이 느껴지나요? (최대 5개)</FieldLabel>
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px', marginTop: '10px' }}>
@@ -325,18 +318,7 @@ function TastingContent() {
                   const selected = (tasting.flavors ?? []).includes(f);
                   const maxed    = (tasting.flavors ?? []).length >= 5 && !selected;
                   return (
-                    <button
-                      key={f}
-                      onClick={() => toggleFlavor(f)}
-                      disabled={maxed}
-                      style={{
-                        ...chipStyle,
-                        background: selected ? '#8b1a2e' : 'rgba(201,169,110,0.08)',
-                        color:      selected ? '#f0d0c0' : maxed ? '#4a3a4a' : '#9a7a6a',
-                        cursor:     maxed ? 'not-allowed' : 'pointer',
-                        opacity:    maxed ? 0.5 : 1,
-                      }}
-                    >
+                    <button key={f} onClick={() => toggleFlavor(f)} disabled={maxed} style={{ ...chipStyle, background: selected ? '#8b1a2e' : 'rgba(201,169,110,0.08)', color: selected ? '#f0d0c0' : maxed ? '#4a3a4a' : '#9a7a6a', cursor: maxed ? 'not-allowed' : 'pointer', opacity: maxed ? 0.5 : 1 }}>
                       {f}
                     </button>
                   );
@@ -344,7 +326,6 @@ function TastingContent() {
               </div>
             </Card>
 
-            {/* 샴페인/스파클링: 기포 */}
             {(activeType === 'champagne' || activeType === 'sparkling') && (
               <Card>
                 <FieldLabel>기포는 어떤가요?</FieldLabel>
@@ -352,7 +333,6 @@ function TastingContent() {
               </Card>
             )}
 
-            {/* 화이트/레드: 산도 + 바디 */}
             {(activeType === 'white' || activeType === 'red') && (
               <>
                 <Card>
@@ -366,7 +346,6 @@ function TastingContent() {
               </>
             )}
 
-            {/* 레드 전용: 탄닌 */}
             {activeType === 'red' && (
               <Card>
                 <FieldLabel>탄닌(떫은맛)은?</FieldLabel>
@@ -374,172 +353,120 @@ function TastingContent() {
               </Card>
             )}
 
-            {/* 전체 느낌 */}
             <Card>
               <FieldLabel>전체적인 느낌은?</FieldLabel>
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px', marginTop: '10px' }}>
                 {FEELING_OPTIONS.map(f => (
-                  <button
-                    key={f}
-                    onClick={() => setField('feeling', f)}
-                    style={{
-                      ...chipStyle,
-                      background: tasting.feeling === f ? '#8b1a2e' : 'rgba(201,169,110,0.08)',
-                      color:      tasting.feeling === f ? '#f0d0c0' : '#9a7a6a',
-                    }}
-                  >
+                  <button key={f} onClick={() => setField('feeling', f)} style={{ ...chipStyle, background: tasting.feeling === f ? '#8b1a2e' : 'rgba(201,169,110,0.08)', color: tasting.feeling === f ? '#f0d0c0' : '#9a7a6a' }}>
                     {f}
                   </button>
                 ))}
               </div>
             </Card>
 
-            {error && (
-              <p style={{ fontFamily: 'var(--font-noto-sans-kr)', fontSize: '13px', color: '#e05050', marginBottom: '12px' }}>
-                {error}
-              </p>
-            )}
+            {error && <p style={{ fontFamily: 'var(--font-noto-sans-kr)', fontSize: '13px', color: '#e05050', marginBottom: '12px' }}>{error}</p>}
 
-            <button
-              onClick={handleSubmit}
-              disabled={!tasting.feeling}
-              style={{ ...primaryBtn, width: '100%', opacity: tasting.feeling ? 1 : 0.45 }}
-            >
+            <button onClick={handleSubmit} disabled={!tasting.feeling} style={{ ...primaryBtn, width: '100%', opacity: tasting.feeling ? 1 : 0.45 }}>
               분석 시작 →
             </button>
           </div>
         )}
 
-        {/* ── STEP 2: 취향 분석 결과 ───────────────────────────── */}
-        {step === 'profile' && analysisResult && (
-          <div>
-            <div style={{
-              background: 'rgba(255,255,255,0.03)',
-              border: '1px solid rgba(201,169,110,0.2)',
-              borderRadius: '16px',
-              padding: '24px',
-              marginBottom: '16px',
-            }}>
-              <p style={{
-                fontFamily: 'var(--font-noto-sans-kr)',
-                fontSize: '11px',
-                color: '#c9a96e',
-                letterSpacing: '0.15em',
-                margin: '0 0 14px',
-              }}>
+        {/* ── STEP 2: 취향 분석 (스트리밍 + 완료) ─────────────── */}
+        {step === 'profile' && (
+          <div style={{ animation: 'fadeIn 0.3s ease' }}>
+            {/* 프로필 카드 */}
+            <div style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(201,169,110,0.2)', borderRadius: '16px', padding: '24px', marginBottom: '16px' }}>
+              <p style={{ fontFamily: 'var(--font-noto-sans-kr)', fontSize: '11px', color: '#c9a96e', letterSpacing: '0.15em', margin: '0 0 14px' }}>
                 ✦ 나의 와인 취향
               </p>
-              <p style={{
-                fontFamily: 'var(--font-cormorant)',
-                fontSize: '26px',
-                color: '#c9a96e',
-                margin: '0 0 6px',
-                lineHeight: 1.2,
-              }}>
-                {analysisResult.profile.persona}
-              </p>
-              <p style={{
-                fontFamily: 'var(--font-noto-sans-kr)',
-                fontSize: '14px',
-                color: '#e8ddd4',
-                margin: '0 0 22px',
-                lineHeight: 1.6,
-              }}>
-                {analysisResult.profile.title}
-              </p>
 
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
-                <ProfileSection label="향 취향"        content={analysisResult.profile.aroma} />
-                <ProfileSection label="구조감"          content={analysisResult.profile.structure} />
-                <ProfileSection label="어울리는 상황"   content={analysisResult.profile.pairing} />
+              {/* Persona */}
+              <div style={{ minHeight: '36px', marginBottom: '6px', transition: 'opacity 0.5s', opacity: currentProfile.persona ? 1 : 0.4 }}>
+                <p style={{ fontFamily: 'var(--font-cormorant)', fontSize: '26px', color: '#c9a96e', margin: 0, lineHeight: 1.2 }}>
+                  {currentProfile.persona || (isStreaming ? '...' : '')}
+                </p>
               </div>
+
+              {/* Title */}
+              <div style={{ minHeight: '22px', marginBottom: '22px', transition: 'opacity 0.5s', opacity: currentProfile.title ? 1 : 0 }}>
+                <p style={{ fontFamily: 'var(--font-noto-sans-kr)', fontSize: '14px', color: '#e8ddd4', margin: 0, lineHeight: 1.6 }}>
+                  {currentProfile.title || ''}
+                </p>
+              </div>
+
+              {/* Aroma / Structure / Pairing */}
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+                {PROFILE_SECTIONS.map(({ field, label }) => (
+                  <div key={field}>
+                    <p style={{ fontFamily: 'var(--font-noto-sans-kr)', fontSize: '11px', color: '#c9a96e', margin: '0 0 4px', letterSpacing: '0.06em' }}>
+                      {label}
+                    </p>
+                    {currentProfile[field] ? (
+                      <p style={{ fontFamily: 'var(--font-noto-sans-kr)', fontSize: '13px', color: '#b09080', lineHeight: 1.7, margin: 0, animation: 'fadeIn 0.4s ease' }}>
+                        {currentProfile[field]}
+                      </p>
+                    ) : (
+                      <div style={{ height: '18px', borderRadius: '4px', background: 'linear-gradient(90deg,rgba(255,255,255,0.04) 25%,rgba(255,255,255,0.08) 50%,rgba(255,255,255,0.04) 75%)', backgroundSize: '200% 100%', animation: isStreaming ? 'shimmer 1.8s ease-in-out infinite' : 'none', opacity: isStreaming ? 1 : 0 }} />
+                    )}
+                  </div>
+                ))}
+              </div>
+
+              {/* 스트리밍 중 인디케이터 */}
+              {isStreaming && (
+                <div style={{ display: 'flex', gap: '4px', alignItems: 'center', marginTop: '20px' }}>
+                  {[0, 0.3, 0.6].map((delay, i) => (
+                    <span key={i} style={{ width: '6px', height: '6px', borderRadius: '50%', background: '#c9a96e', display: 'inline-block', animation: `blink 1.2s ease-in-out ${delay}s infinite` }} />
+                  ))}
+                  <span style={{ fontFamily: 'var(--font-noto-sans-kr)', fontSize: '11px', color: '#7a5c6a', marginLeft: '8px' }}>분석 중</span>
+                </div>
+              )}
             </div>
 
-            {/* 입력 요약 칩 */}
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px', marginBottom: '20px' }}>
-              {(tasting.flavors ?? []).map(f => <SummaryChip key={f}>{f}</SummaryChip>)}
-              {tasting.acidity && <SummaryChip>산도 {tasting.acidity}</SummaryChip>}
-              {tasting.body    && <SummaryChip>바디 {tasting.body}</SummaryChip>}
-              {tasting.tannin  && <SummaryChip>탄닌 {tasting.tannin}</SummaryChip>}
-              {tasting.bubble  && <SummaryChip>기포 {tasting.bubble}</SummaryChip>}
-              {tasting.feeling && <SummaryChip>{tasting.feeling}</SummaryChip>}
-            </div>
-
-            <button
-              onClick={() => setStep('recommend')}
-              style={{ ...primaryBtn, width: '100%' }}
-            >
-              🍾 나에게 맞는 와인 추천받기
-            </button>
+            {/* 완료 후: 입력 요약 + CTA */}
+            {!isStreaming && analysisResult && (
+              <div style={{ animation: 'fadeIn 0.4s ease' }}>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px', marginBottom: '20px' }}>
+                  {(tasting.flavors ?? []).map(f => <SummaryChip key={f}>{f}</SummaryChip>)}
+                  {tasting.acidity && <SummaryChip>산도 {tasting.acidity}</SummaryChip>}
+                  {tasting.body    && <SummaryChip>바디 {tasting.body}</SummaryChip>}
+                  {tasting.tannin  && <SummaryChip>탄닌 {tasting.tannin}</SummaryChip>}
+                  {tasting.bubble  && <SummaryChip>기포 {tasting.bubble}</SummaryChip>}
+                  {tasting.feeling && <SummaryChip>{tasting.feeling}</SummaryChip>}
+                </div>
+                <button onClick={() => setStep('recommend')} style={{ ...primaryBtn, width: '100%' }}>
+                  🍾 나에게 맞는 와인 추천받기
+                </button>
+              </div>
+            )}
           </div>
         )}
 
         {/* ── STEP 3: 탭 기반 큐레이션 ─────────────────────────── */}
         {step === 'recommend' && analysisResult && (
           <div>
-            {/* 탭바 */}
-            <div style={{
-              display: 'flex',
-              borderBottom: '1px solid rgba(201,169,110,0.2)',
-              marginBottom: '20px',
-              overflowX: 'auto',
-            }}>
+            <div style={{ display: 'flex', borderBottom: '1px solid rgba(201,169,110,0.2)', marginBottom: '20px', overflowX: 'auto' }}>
               {TABS.map(tab => (
                 <button
                   key={tab.key}
                   onClick={() => setActiveTab(tab.key)}
-                  style={{
-                    fontFamily: 'var(--font-noto-sans-kr)',
-                    fontSize: '13px',
-                    background: 'transparent',
-                    border: 'none',
-                    borderBottom: activeTab === tab.key
-                      ? '2px solid #c9a96e'
-                      : '2px solid transparent',
-                    color:   activeTab === tab.key ? '#c9a96e' : '#7a5c6a',
-                    padding: '10px 14px',
-                    cursor:  'pointer',
-                    whiteSpace: 'nowrap',
-                    transition: 'color 0.2s, border-color 0.2s',
-                    marginBottom: '-1px',
-                    flexShrink: 0,
-                  }}
+                  style={{ fontFamily: 'var(--font-noto-sans-kr)', fontSize: '13px', background: 'transparent', border: 'none', borderBottom: activeTab === tab.key ? '2px solid #c9a96e' : '2px solid transparent', color: activeTab === tab.key ? '#c9a96e' : '#7a5c6a', padding: '10px 14px', cursor: 'pointer', whiteSpace: 'nowrap', transition: 'color 0.2s, border-color 0.2s', marginBottom: '-1px', flexShrink: 0 }}
                 >
                   {tab.label}
                 </button>
               ))}
             </div>
 
-            {/* 카드 목록 */}
-            <div
-              key={activeTab}
-              style={{
-                display: 'flex',
-                flexDirection: 'column',
-                gap: '14px',
-                animation: 'fadeIn 0.25s ease',
-              }}
-            >
-              <style>{`@keyframes fadeIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }`}</style>
+            <div key={activeTab} style={{ display: 'flex', flexDirection: 'column', gap: '14px', animation: 'fadeIn 0.25s ease' }}>
               {analysisResult.recommendations[activeTab].map((item, i) => (
                 <RecommendCard key={i} item={item} index={i} />
               ))}
             </div>
 
-            {/* 하단 버튼 */}
             <div style={{ display: 'flex', gap: '10px', marginTop: '28px' }}>
-              <button
-                onClick={() => setStep('profile')}
-                style={{ ...secondaryBtn, flex: 1 }}
-              >
-                ← 취향 분석으로
-              </button>
-              <button
-                onClick={handleReset}
-                style={{ ...primaryBtn, flex: 1 }}
-              >
-                처음으로
-              </button>
+              <button onClick={() => setStep('profile')} style={{ ...secondaryBtn, flex: 1 }}>← 취향 분석으로</button>
+              <button onClick={handleReset} style={{ ...primaryBtn, flex: 1 }}>처음으로</button>
             </div>
           </div>
         )}
@@ -551,42 +478,9 @@ function TastingContent() {
 
 // ── 서브 컴포넌트 ──────────────────────────────────────────────
 
-function ProfileSection({ label, content }: { label: string; content: string }) {
-  return (
-    <div>
-      <p style={{
-        fontFamily: 'var(--font-noto-sans-kr)',
-        fontSize: '11px',
-        color: '#c9a96e',
-        margin: '0 0 4px',
-        letterSpacing: '0.06em',
-      }}>
-        {label}
-      </p>
-      <p style={{
-        fontFamily: 'var(--font-noto-sans-kr)',
-        fontSize: '13px',
-        color: '#b09080',
-        lineHeight: 1.7,
-        margin: 0,
-      }}>
-        {content}
-      </p>
-    </div>
-  );
-}
-
 function SummaryChip({ children }: { children: React.ReactNode }) {
   return (
-    <span style={{
-      fontFamily: 'var(--font-noto-sans-kr)',
-      fontSize: '11px',
-      background: 'rgba(201,169,110,0.1)',
-      color: '#c9a96e',
-      borderRadius: '20px',
-      padding: '3px 10px',
-      border: '1px solid rgba(201,169,110,0.2)',
-    }}>
+    <span style={{ fontFamily: 'var(--font-noto-sans-kr)', fontSize: '11px', background: 'rgba(201,169,110,0.1)', color: '#c9a96e', borderRadius: '20px', padding: '3px 10px', border: '1px solid rgba(201,169,110,0.2)' }}>
       {children}
     </span>
   );
@@ -594,19 +488,8 @@ function SummaryChip({ children }: { children: React.ReactNode }) {
 
 function RecommendCard({ item, index }: { item: WineRecommendItem; index: number }) {
   return (
-    <div style={{
-      background: 'rgba(255,255,255,0.03)',
-      border: '1px solid rgba(201,169,110,0.2)',
-      borderRadius: '12px',
-      padding: '18px',
-    }}>
-      <p style={{
-        fontFamily: 'var(--font-cormorant)',
-        fontSize: '17px',
-        color: '#e8ddd4',
-        margin: '0 0 8px',
-        lineHeight: 1.3,
-      }}>
+    <div style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(201,169,110,0.2)', borderRadius: '12px', padding: '18px' }}>
+      <p style={{ fontFamily: 'var(--font-cormorant)', fontSize: '17px', color: '#e8ddd4', margin: '0 0 8px', lineHeight: 1.3 }}>
         {index + 1}. {item.name}
       </p>
       <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap', marginBottom: '10px' }}>
@@ -615,13 +498,7 @@ function RecommendCard({ item, index }: { item: WineRecommendItem; index: number
         {item.producer && <Tag>{item.producer}</Tag>}
         <Tag gold>{item.price}</Tag>
       </div>
-      <p style={{
-        fontFamily: 'var(--font-noto-sans-kr)',
-        fontSize: '13px',
-        color: '#b09080',
-        lineHeight: 1.7,
-        margin: 0,
-      }}>
+      <p style={{ fontFamily: 'var(--font-noto-sans-kr)', fontSize: '13px', color: '#b09080', lineHeight: 1.7, margin: 0 }}>
         {item.reason}
       </p>
     </div>
@@ -629,44 +506,22 @@ function RecommendCard({ item, index }: { item: WineRecommendItem; index: number
 }
 
 function FieldLabel({ children }: { children: React.ReactNode }) {
-  return (
-    <p style={{ fontFamily: 'var(--font-noto-sans-kr)', fontSize: '13px', color: '#9a7a6a', margin: 0 }}>
-      {children}
-    </p>
-  );
+  return <p style={{ fontFamily: 'var(--font-noto-sans-kr)', fontSize: '13px', color: '#9a7a6a', margin: 0 }}>{children}</p>;
 }
 
 function Card({ children }: { children: React.ReactNode }) {
   return (
-    <div style={{
-      background: 'rgba(255,255,255,0.03)',
-      border: '1px solid rgba(201,169,110,0.2)',
-      borderRadius: '12px',
-      padding: '16px',
-      marginBottom: '12px',
-    }}>
+    <div style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(201,169,110,0.2)', borderRadius: '12px', padding: '16px', marginBottom: '12px' }}>
       {children}
     </div>
   );
 }
 
-function OptionGroup({ options, value, onChange }: {
-  options: string[];
-  value?: string;
-  onChange: (v: string) => void;
-}) {
+function OptionGroup({ options, value, onChange }: { options: string[]; value?: string; onChange: (v: string) => void }) {
   return (
     <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', marginTop: '10px' }}>
       {options.map(o => (
-        <button
-          key={o}
-          onClick={() => onChange(o)}
-          style={{
-            ...chipStyle,
-            background: value === o ? '#8b1a2e' : 'rgba(201,169,110,0.08)',
-            color:      value === o ? '#f0d0c0' : '#9a7a6a',
-          }}
-        >
+        <button key={o} onClick={() => onChange(o)} style={{ ...chipStyle, background: value === o ? '#8b1a2e' : 'rgba(201,169,110,0.08)', color: value === o ? '#f0d0c0' : '#9a7a6a' }}>
           {o}
         </button>
       ))}
@@ -676,14 +531,7 @@ function OptionGroup({ options, value, onChange }: {
 
 function Tag({ children, gold }: { children: React.ReactNode; gold?: boolean }) {
   return (
-    <span style={{
-      fontFamily: 'var(--font-noto-sans-kr)',
-      fontSize: '11px',
-      background: gold ? 'rgba(201,169,110,0.12)' : 'rgba(255,255,255,0.05)',
-      color:      gold ? '#c9a96e' : '#7a5c6a',
-      borderRadius: '20px',
-      padding: '2px 10px',
-    }}>
+    <span style={{ fontFamily: 'var(--font-noto-sans-kr)', fontSize: '11px', background: gold ? 'rgba(201,169,110,0.12)' : 'rgba(255,255,255,0.05)', color: gold ? '#c9a96e' : '#7a5c6a', borderRadius: '20px', padding: '2px 10px' }}>
       {children}
     </span>
   );
@@ -692,61 +540,32 @@ function Tag({ children, gold }: { children: React.ReactNode; gold?: boolean }) 
 // ── 공통 스타일 ───────────────────────────────────────────────
 
 const inputStyle: React.CSSProperties = {
-  width: '100%',
-  background: 'rgba(0,0,0,0.3)',
-  border: '1px solid rgba(201,169,110,0.2)',
-  borderRadius: '8px',
-  padding: '10px 12px',
-  color: '#e8ddd4',
-  fontSize: '14px',
-  fontFamily: 'var(--font-noto-sans-kr)',
-  outline: 'none',
-  boxSizing: 'border-box',
+  width: '100%', background: 'rgba(0,0,0,0.3)', border: '1px solid rgba(201,169,110,0.2)',
+  borderRadius: '8px', padding: '10px 12px', color: '#e8ddd4', fontSize: '14px',
+  fontFamily: 'var(--font-noto-sans-kr)', outline: 'none', boxSizing: 'border-box',
 };
 
 const chipStyle: React.CSSProperties = {
-  fontFamily: 'var(--font-noto-sans-kr)',
-  fontSize: '12px',
-  borderRadius: '20px',
-  padding: '5px 12px',
-  border: 'none',
-  cursor: 'pointer',
-  transition: 'background 0.15s, color 0.15s',
+  fontFamily: 'var(--font-noto-sans-kr)', fontSize: '12px', borderRadius: '20px',
+  padding: '5px 12px', border: 'none', cursor: 'pointer', transition: 'background 0.15s, color 0.15s',
 };
 
 const primaryBtn: React.CSSProperties = {
-  fontFamily: 'var(--font-noto-sans-kr)',
-  fontSize: '14px',
-  background: '#8b1a2e',
-  color: '#f0d0c0',
-  border: 'none',
-  borderRadius: '10px',
-  padding: '14px 24px',
-  cursor: 'pointer',
-  letterSpacing: '0.02em',
+  fontFamily: 'var(--font-noto-sans-kr)', fontSize: '14px', background: '#8b1a2e',
+  color: '#f0d0c0', border: 'none', borderRadius: '10px', padding: '14px 24px',
+  cursor: 'pointer', letterSpacing: '0.02em',
 };
 
 const secondaryBtn: React.CSSProperties = {
-  fontFamily: 'var(--font-noto-sans-kr)',
-  fontSize: '13px',
-  background: 'transparent',
-  color: '#9a7a6a',
-  border: '1px solid rgba(201,169,110,0.3)',
-  borderRadius: '10px',
-  padding: '14px 24px',
-  cursor: 'pointer',
+  fontFamily: 'var(--font-noto-sans-kr)', fontSize: '13px', background: 'transparent',
+  color: '#9a7a6a', border: '1px solid rgba(201,169,110,0.3)', borderRadius: '10px',
+  padding: '14px 24px', cursor: 'pointer',
 };
 
 const backBtn: React.CSSProperties = {
-  fontFamily: 'var(--font-noto-sans-kr)',
-  fontSize: '12px',
-  background: 'transparent',
-  color: '#7a5c6a',
-  border: '1px solid rgba(201,169,110,0.2)',
-  borderRadius: '8px',
-  padding: '6px 12px',
-  cursor: 'pointer',
-  whiteSpace: 'nowrap',
+  fontFamily: 'var(--font-noto-sans-kr)', fontSize: '12px', background: 'transparent',
+  color: '#7a5c6a', border: '1px solid rgba(201,169,110,0.2)', borderRadius: '8px',
+  padding: '6px 12px', cursor: 'pointer', whiteSpace: 'nowrap',
 };
 
 // ── export ────────────────────────────────────────────────────
@@ -754,15 +573,7 @@ const backBtn: React.CSSProperties = {
 export default function TastingPage() {
   return (
     <Suspense fallback={
-      <div style={{
-        minHeight: '100vh',
-        background: '#0a0608',
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        color: '#c9a96e',
-        fontFamily: 'serif',
-      }}>
+      <div style={{ minHeight: '100vh', background: '#0a0608', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#c9a96e', fontFamily: 'serif' }}>
         🍷 Loading...
       </div>
     }>
