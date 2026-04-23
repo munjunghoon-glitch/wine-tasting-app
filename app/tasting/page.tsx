@@ -60,6 +60,7 @@ function TastingContent() {
   const [activeTab, setActiveTab]             = useState<TabKey>('by_country');
   const [error, setError]                     = useState('');
   const [recsError, setRecsError]             = useState('');
+  const [downloading, setDownloading]         = useState(false);
 
   const activeType: WineType = isCustom ? customType : (selectedWine?.type ?? 'red');
 
@@ -150,6 +151,76 @@ function TastingContent() {
       const msg = e instanceof Error ? e.message : '알 수 없는 오류';
       setError(`분석 중 오류가 발생했습니다: ${msg}`);
       setLoadingProfile(false);
+    }
+  }
+
+  async function downloadCard() {
+    if (!profile || downloading) return;
+    setDownloading(true);
+
+    const { default: html2canvas } = await import('html2canvas');
+
+    const chips = [
+      ...(tasting.flavors ?? []),
+      tasting.acidity ? `산도 ${tasting.acidity}` : null,
+      tasting.body    ? `바디 ${tasting.body}`    : null,
+      tasting.tannin  ? `탄닌 ${tasting.tannin}`  : null,
+      tasting.bubble  ? `기포 ${tasting.bubble}`  : null,
+      tasting.feeling ?? null,
+    ].filter((c): c is string => Boolean(c));
+
+    const chipHtml = chips.map(c =>
+      `<span style="display:inline-block;font-size:22px;background:rgba(201,169,110,0.12);color:#c9a96e;border-radius:40px;padding:6px 20px;border:1px solid rgba(201,169,110,0.25);margin:0 8px 8px 0;font-family:'Noto Sans KR',sans-serif;">${c}</span>`
+    ).join('');
+
+    const section = (label: string, content: string) => `
+      <div style="margin-bottom:28px;">
+        <p style="font-size:22px;color:#c9a96e;margin:0 0 8px;letter-spacing:0.12em;font-family:'Noto Sans KR',sans-serif;">${label}</p>
+        <p style="font-size:26px;color:#b09080;line-height:1.8;margin:0;font-family:'Noto Sans KR',sans-serif;">${content}</p>
+      </div>`;
+
+    const el = document.createElement('div');
+    Object.assign(el.style, {
+      position: 'fixed', left: '-9999px', top: '0',
+      width: '780px', background: '#0a0608',
+      padding: '96px 56px 80px', boxSizing: 'border-box',
+    });
+
+    el.innerHTML = `
+      <p style="font-size:28px;color:#c9a96e;letter-spacing:0.25em;text-align:center;margin:0 0 64px;font-family:'Cormorant Garamond',Georgia,serif;font-weight:300;">
+        🍷 나의 와인 취향
+      </p>
+      <div style="background:rgba(255,255,255,0.035);border:1px solid rgba(201,169,110,0.25);border-radius:32px;padding:48px;margin-bottom:28px;">
+        <p style="font-size:22px;color:#c9a96e;letter-spacing:0.15em;margin:0 0 24px;font-family:'Noto Sans KR',sans-serif;">✦ 취향 프로파일</p>
+        <p style="font-size:52px;color:#c9a96e;margin:0 0 16px;line-height:1.3;font-family:'Cormorant Garamond',Georgia,serif;">${profile.persona}</p>
+        <p style="font-size:26px;color:#e8ddd4;margin:0 0 44px;line-height:1.7;font-family:'Noto Sans KR',sans-serif;">${profile.title}</p>
+        ${section('향 취향', profile.aroma)}
+        ${section('구조감', profile.structure)}
+        <div>
+          <p style="font-size:22px;color:#c9a96e;margin:0 0 8px;letter-spacing:0.12em;font-family:'Noto Sans KR',sans-serif;">어울리는 상황</p>
+          <p style="font-size:26px;color:#b09080;line-height:1.8;margin:0;font-family:'Noto Sans KR',sans-serif;">${profile.pairing}</p>
+        </div>
+      </div>
+      <div style="margin-bottom:64px;">${chipHtml}</div>
+      <p style="font-size:22px;color:rgba(201,169,110,0.4);text-align:center;margin:0;letter-spacing:0.08em;font-family:'Noto Sans KR',sans-serif;">
+        wine-tasting-app-yw74.vercel.app
+      </p>`;
+
+    document.body.appendChild(el);
+    try {
+      const canvas = await html2canvas(el, {
+        backgroundColor: '#0a0608',
+        scale: 2,
+        useCORS: true,
+        logging: false,
+      });
+      const link = document.createElement('a');
+      link.download = 'wine-taste-결과.png';
+      link.href = canvas.toDataURL('image/png');
+      link.click();
+    } finally {
+      document.body.removeChild(el);
+      setDownloading(false);
     }
   }
 
@@ -385,12 +456,14 @@ function TastingContent() {
 
             {/* 추천 완료 → CTA 버튼 활성화 */}
             {!loadingRecs && recommendations && (
-              <button
-                onClick={() => setStep('recommend')}
-                style={{ ...primaryBtn, width: '100%', animation: 'fadeIn 0.4s ease' }}
-              >
-                🍾 나에게 맞는 와인 추천받기
-              </button>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', animation: 'fadeIn 0.4s ease' }}>
+                <button onClick={() => setStep('recommend')} style={{ ...primaryBtn, width: '100%' }}>
+                  🍾 나에게 맞는 와인 추천받기
+                </button>
+                <button onClick={downloadCard} disabled={downloading} style={{ ...downloadBtn, width: '100%' }}>
+                  {downloading ? '저장 중...' : '📸 내 취향 카드 저장하기'}
+                </button>
+              </div>
             )}
           </div>
         )}
@@ -514,6 +587,12 @@ const chipStyle: React.CSSProperties = {
 const primaryBtn: React.CSSProperties = {
   fontFamily: 'var(--font-noto-sans-kr)', fontSize: '14px', background: '#8b1a2e',
   color: '#f0d0c0', border: 'none', borderRadius: '10px', padding: '14px 24px',
+  cursor: 'pointer', letterSpacing: '0.02em',
+};
+
+const downloadBtn: React.CSSProperties = {
+  fontFamily: 'var(--font-noto-sans-kr)', fontSize: '14px', background: 'transparent',
+  color: '#c9a96e', border: '1px solid #c9a96e', borderRadius: '10px', padding: '14px 24px',
   cursor: 'pointer', letterSpacing: '0.02em',
 };
 
