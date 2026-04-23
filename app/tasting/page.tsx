@@ -3,7 +3,7 @@
 import { useState, Suspense } from 'react';
 import { useSearchParams } from 'next/navigation';
 import { getSession } from '@/data/sessions';
-import type { Wine, WineType, TastingData, AIAnalysisResult, WineProfile, WineRecommendItem } from '@/utils/types';
+import type { Wine, WineType, TastingData, AIAnalysisResult, WineRecommendItem } from '@/utils/types';
 
 // ── 상수 ──────────────────────────────────────────────────────
 
@@ -37,22 +37,8 @@ const TABS = [
   { key: 'by_price'    as const, label: '💰 가격대별' },
 ];
 
-const PROFILE_SECTIONS: { field: keyof WineProfile; label: string }[] = [
-  { field: 'aroma',     label: '향 취향' },
-  { field: 'structure', label: '구조감' },
-  { field: 'pairing',   label: '어울리는 상황' },
-];
-
 type Step   = 'select' | 'tasting' | 'profile' | 'recommend';
 type TabKey = 'by_country' | 'by_grape' | 'by_producer' | 'by_price';
-
-// JSON 스트림에서 완성된 필드 추출
-function extractJsonField(text: string, field: string): string | null {
-  const regex = new RegExp(`"${field}"\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)"`)
-  const match = text.match(regex);
-  if (!match) return null;
-  return match[1].replace(/\\n/g, '\n').replace(/\\"/g, '"');
-}
 
 // ── 메인 ──────────────────────────────────────────────────────
 
@@ -61,25 +47,18 @@ function TastingContent() {
   const sessionId    = searchParams.get('session') || 'default';
   const session      = getSession(sessionId);
 
-  const [step, setStep]                     = useState<Step>('select');
-  const [selectedWine, setSelectedWine]     = useState<Wine | null>(null);
-  const [isCustom, setIsCustom]             = useState(false);
-  const [customName, setCustomName]         = useState('');
-  const [customType, setCustomType]         = useState<WineType>('red');
-  const [tasting, setTasting]               = useState<Partial<TastingData>>({ flavors: [] });
-  const [loading, setLoading]               = useState(false);
-  const [isStreaming, setIsStreaming]        = useState(false);
-  const [partialProfile, setPartialProfile] = useState<Partial<WineProfile>>({});
+  const [step, setStep]                   = useState<Step>('select');
+  const [selectedWine, setSelectedWine]   = useState<Wine | null>(null);
+  const [isCustom, setIsCustom]           = useState(false);
+  const [customName, setCustomName]       = useState('');
+  const [customType, setCustomType]       = useState<WineType>('red');
+  const [tasting, setTasting]             = useState<Partial<TastingData>>({ flavors: [] });
+  const [loading, setLoading]             = useState(false);
   const [analysisResult, setAnalysisResult] = useState<AIAnalysisResult | null>(null);
-  const [activeTab, setActiveTab]           = useState<TabKey>('by_country');
-  const [error, setError]                   = useState('');
+  const [activeTab, setActiveTab]         = useState<TabKey>('by_country');
+  const [error, setError]                 = useState('');
 
   const activeType: WineType = isCustom ? customType : (selectedWine?.type ?? 'red');
-
-  // 프로필 표시용: 스트리밍 중엔 partialProfile, 완료 후엔 analysisResult
-  const currentProfile: Partial<WineProfile> = isStreaming
-    ? partialProfile
-    : (analysisResult?.profile ?? {});
 
   function handleSelectWine(wine: Wine) {
     setSelectedWine(wine);
@@ -116,13 +95,11 @@ function TastingContent() {
     }
     setError('');
     setLoading(true);
-    setPartialProfile({});
-    setAnalysisResult(null);
 
     const wineName = isCustom ? (customName || '알 수 없는 와인') : (selectedWine?.name ?? '');
 
     try {
-      const response = await fetch('/api/ai-recommend', {
+      const res = await fetch('/api/ai-recommend', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -139,52 +116,21 @@ function TastingContent() {
         }),
       });
 
-      if (!response.ok || !response.body) throw new Error('API 오류');
+      const data = await res.json();
 
-      // 연결 성립 → 스트리밍 뷰로 전환
-      setLoading(false);
-      setIsStreaming(true);
-      setStep('profile');
-
-      const reader  = response.body.getReader();
-      const decoder = new TextDecoder();
-      let accumulated = '';
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        accumulated += decoder.decode(value, { stream: true });
-
-        // 완성된 필드 실시간 추출
-        const partial: Partial<WineProfile> = {};
-        for (const { field } of PROFILE_SECTIONS) {
-          const val = extractJsonField(accumulated, field);
-          if (val) partial[field] = val;
-        }
-        const persona = extractJsonField(accumulated, 'persona');
-        const title   = extractJsonField(accumulated, 'title');
-        if (persona) partial.persona = persona;
-        if (title)   partial.title   = title;
-        setPartialProfile(partial);
+      if (!data.success) {
+        throw new Error(data.error || '알 수 없는 오류');
       }
 
-      // 스트림 완료 → 전체 JSON 파싱
-      const cleaned   = accumulated.replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
-      const jsonMatch = cleaned.match(/\{[\s\S]*\}/);
-      if (!jsonMatch) throw new Error('JSON 파싱 실패');
-
-      const result = JSON.parse(jsonMatch[0]) as AIAnalysisResult;
-      setAnalysisResult(result);
+      setAnalysisResult(data.result);
       setActiveTab('by_country');
-      setIsStreaming(false);
+      setStep('profile');
 
     } catch (e) {
-      console.error(e);
+      const msg = e instanceof Error ? e.message : '알 수 없는 오류';
+      setError(`분석 중 오류가 발생했습니다: ${msg}`);
+    } finally {
       setLoading(false);
-      setIsStreaming(false);
-      setStep('tasting');
-      setError('분석 중 오류가 발생했습니다. 다시 시도해주세요.');
     }
   }
 
@@ -194,26 +140,18 @@ function TastingContent() {
     setIsCustom(false);
     setCustomName('');
     setTasting({ flavors: [] });
-    setPartialProfile({});
     setAnalysisResult(null);
     setActiveTab('by_country');
-    setIsStreaming(false);
     setError('');
   }
 
-  // ── 로딩 화면 (API 연결 대기) ─────────────────────────────────
+  // ── 로딩 화면 ─────────────────────────────────────────────
   if (loading) {
     return (
-      <div style={{
-        minHeight: '100vh', background: '#0a0608',
-        display: 'flex', flexDirection: 'column',
-        alignItems: 'center', justifyContent: 'center',
-      }}>
-        <style>{`
-          @keyframes pulse { 0%,100%{transform:scale(1);opacity:1} 50%{transform:scale(1.25);opacity:.6} }
-        `}</style>
+      <div style={{ minHeight: '100vh', background: '#0a0608', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center' }}>
+        <style>{`@keyframes pulse{0%,100%{transform:scale(1);opacity:1}50%{transform:scale(1.25);opacity:.6}}`}</style>
         <div style={{ fontSize: '60px', animation: 'pulse 2s ease-in-out infinite' }}>🍷</div>
-        <p style={{ fontFamily: 'var(--font-cormorant)', fontSize: '20px', color: '#c9a96e', marginTop: '28px', letterSpacing: '0.04em' }}>
+        <p style={{ fontFamily: 'var(--font-cormorant)', fontSize: '20px', color: '#c9a96e', marginTop: '28px', letterSpacing: '0.04em', textAlign: 'center' }}>
           소믈리에가 당신의 취향을 분석 중입니다...
         </p>
         <p style={{ fontFamily: 'var(--font-noto-sans-kr)', fontSize: '13px', color: '#7a5c6a', marginTop: '10px' }}>
@@ -225,12 +163,7 @@ function TastingContent() {
 
   return (
     <div style={{ minHeight: '100vh', background: '#0a0608', color: '#e8ddd4' }}>
-      {/* CSS 애니메이션 */}
-      <style>{`
-        @keyframes fadeIn { from{opacity:0;transform:translateY(6px)} to{opacity:1;transform:translateY(0)} }
-        @keyframes shimmer { 0%{background-position:200% 0} 100%{background-position:-200% 0} }
-        @keyframes blink { 0%,100%{opacity:1} 50%{opacity:.3} }
-      `}</style>
+      <style>{`@keyframes fadeIn{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:translateY(0)}}`}</style>
 
       {/* 헤더 */}
       <header style={{ borderBottom: '1px solid rgba(201,169,110,0.2)', padding: '20px 16px', textAlign: 'center' }}>
@@ -276,7 +209,8 @@ function TastingContent() {
               <div style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(201,169,110,0.2)', borderRadius: '12px', padding: '16px' }}>
                 <p style={{ fontFamily: 'var(--font-noto-sans-kr)', fontSize: '14px', color: '#e8ddd4', margin: '0 0 12px' }}>✏️ 기타 직접 입력</p>
                 <input
-                  type="text" value={customName}
+                  type="text"
+                  value={customName}
                   onChange={e => setCustomName(e.target.value)}
                   placeholder="와인 이름을 입력하세요"
                   style={inputStyle}
@@ -364,7 +298,11 @@ function TastingContent() {
               </div>
             </Card>
 
-            {error && <p style={{ fontFamily: 'var(--font-noto-sans-kr)', fontSize: '13px', color: '#e05050', marginBottom: '12px' }}>{error}</p>}
+            {error && (
+              <p style={{ fontFamily: 'var(--font-noto-sans-kr)', fontSize: '13px', color: '#e05050', marginBottom: '12px', lineHeight: 1.5 }}>
+                {error}
+              </p>
+            )}
 
             <button onClick={handleSubmit} disabled={!tasting.feeling} style={{ ...primaryBtn, width: '100%', opacity: tasting.feeling ? 1 : 0.45 }}>
               분석 시작 →
@@ -372,74 +310,40 @@ function TastingContent() {
           </div>
         )}
 
-        {/* ── STEP 2: 취향 분석 (스트리밍 + 완료) ─────────────── */}
-        {step === 'profile' && (
+        {/* ── STEP 2: 취향 분석 결과 ───────────────────────────── */}
+        {step === 'profile' && analysisResult && (
           <div style={{ animation: 'fadeIn 0.3s ease' }}>
-            {/* 프로필 카드 */}
             <div style={{ background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(201,169,110,0.2)', borderRadius: '16px', padding: '24px', marginBottom: '16px' }}>
               <p style={{ fontFamily: 'var(--font-noto-sans-kr)', fontSize: '11px', color: '#c9a96e', letterSpacing: '0.15em', margin: '0 0 14px' }}>
                 ✦ 나의 와인 취향
               </p>
+              <p style={{ fontFamily: 'var(--font-cormorant)', fontSize: '26px', color: '#c9a96e', margin: '0 0 6px', lineHeight: 1.2 }}>
+                {analysisResult.profile.persona}
+              </p>
+              <p style={{ fontFamily: 'var(--font-noto-sans-kr)', fontSize: '14px', color: '#e8ddd4', margin: '0 0 22px', lineHeight: 1.6 }}>
+                {analysisResult.profile.title}
+              </p>
 
-              {/* Persona */}
-              <div style={{ minHeight: '36px', marginBottom: '6px', transition: 'opacity 0.5s', opacity: currentProfile.persona ? 1 : 0.4 }}>
-                <p style={{ fontFamily: 'var(--font-cormorant)', fontSize: '26px', color: '#c9a96e', margin: 0, lineHeight: 1.2 }}>
-                  {currentProfile.persona || (isStreaming ? '...' : '')}
-                </p>
-              </div>
-
-              {/* Title */}
-              <div style={{ minHeight: '22px', marginBottom: '22px', transition: 'opacity 0.5s', opacity: currentProfile.title ? 1 : 0 }}>
-                <p style={{ fontFamily: 'var(--font-noto-sans-kr)', fontSize: '14px', color: '#e8ddd4', margin: 0, lineHeight: 1.6 }}>
-                  {currentProfile.title || ''}
-                </p>
-              </div>
-
-              {/* Aroma / Structure / Pairing */}
               <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
-                {PROFILE_SECTIONS.map(({ field, label }) => (
-                  <div key={field}>
-                    <p style={{ fontFamily: 'var(--font-noto-sans-kr)', fontSize: '11px', color: '#c9a96e', margin: '0 0 4px', letterSpacing: '0.06em' }}>
-                      {label}
-                    </p>
-                    {currentProfile[field] ? (
-                      <p style={{ fontFamily: 'var(--font-noto-sans-kr)', fontSize: '13px', color: '#b09080', lineHeight: 1.7, margin: 0, animation: 'fadeIn 0.4s ease' }}>
-                        {currentProfile[field]}
-                      </p>
-                    ) : (
-                      <div style={{ height: '18px', borderRadius: '4px', background: 'linear-gradient(90deg,rgba(255,255,255,0.04) 25%,rgba(255,255,255,0.08) 50%,rgba(255,255,255,0.04) 75%)', backgroundSize: '200% 100%', animation: isStreaming ? 'shimmer 1.8s ease-in-out infinite' : 'none', opacity: isStreaming ? 1 : 0 }} />
-                    )}
-                  </div>
-                ))}
+                <ProfileSection label="향 취향"      content={analysisResult.profile.aroma} />
+                <ProfileSection label="구조감"        content={analysisResult.profile.structure} />
+                <ProfileSection label="어울리는 상황" content={analysisResult.profile.pairing} />
               </div>
-
-              {/* 스트리밍 중 인디케이터 */}
-              {isStreaming && (
-                <div style={{ display: 'flex', gap: '4px', alignItems: 'center', marginTop: '20px' }}>
-                  {[0, 0.3, 0.6].map((delay, i) => (
-                    <span key={i} style={{ width: '6px', height: '6px', borderRadius: '50%', background: '#c9a96e', display: 'inline-block', animation: `blink 1.2s ease-in-out ${delay}s infinite` }} />
-                  ))}
-                  <span style={{ fontFamily: 'var(--font-noto-sans-kr)', fontSize: '11px', color: '#7a5c6a', marginLeft: '8px' }}>분석 중</span>
-                </div>
-              )}
             </div>
 
-            {/* 완료 후: 입력 요약 + CTA */}
-            {!isStreaming && analysisResult && (
-              <div style={{ animation: 'fadeIn 0.4s ease' }}>
-                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px', marginBottom: '20px' }}>
-                  {(tasting.flavors ?? []).map(f => <SummaryChip key={f}>{f}</SummaryChip>)}
-                  {tasting.acidity && <SummaryChip>산도 {tasting.acidity}</SummaryChip>}
-                  {tasting.body    && <SummaryChip>바디 {tasting.body}</SummaryChip>}
-                  {tasting.tannin  && <SummaryChip>탄닌 {tasting.tannin}</SummaryChip>}
-                  {tasting.bubble  && <SummaryChip>기포 {tasting.bubble}</SummaryChip>}
-                  {tasting.feeling && <SummaryChip>{tasting.feeling}</SummaryChip>}
-                </div>
-                <button onClick={() => setStep('recommend')} style={{ ...primaryBtn, width: '100%' }}>
-                  🍾 나에게 맞는 와인 추천받기
-                </button>
-              </div>
-            )}
+            {/* 입력 요약 칩 */}
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px', marginBottom: '20px' }}>
+              {(tasting.flavors ?? []).map(f => <SummaryChip key={f}>{f}</SummaryChip>)}
+              {tasting.acidity && <SummaryChip>산도 {tasting.acidity}</SummaryChip>}
+              {tasting.body    && <SummaryChip>바디 {tasting.body}</SummaryChip>}
+              {tasting.tannin  && <SummaryChip>탄닌 {tasting.tannin}</SummaryChip>}
+              {tasting.bubble  && <SummaryChip>기포 {tasting.bubble}</SummaryChip>}
+              {tasting.feeling && <SummaryChip>{tasting.feeling}</SummaryChip>}
+            </div>
+
+            <button onClick={() => setStep('recommend')} style={{ ...primaryBtn, width: '100%' }}>
+              🍾 나에게 맞는 와인 추천받기
+            </button>
           </div>
         )}
 
@@ -477,6 +381,19 @@ function TastingContent() {
 }
 
 // ── 서브 컴포넌트 ──────────────────────────────────────────────
+
+function ProfileSection({ label, content }: { label: string; content: string }) {
+  return (
+    <div>
+      <p style={{ fontFamily: 'var(--font-noto-sans-kr)', fontSize: '11px', color: '#c9a96e', margin: '0 0 4px', letterSpacing: '0.06em' }}>
+        {label}
+      </p>
+      <p style={{ fontFamily: 'var(--font-noto-sans-kr)', fontSize: '13px', color: '#b09080', lineHeight: 1.7, margin: 0 }}>
+        {content}
+      </p>
+    </div>
+  );
+}
 
 function SummaryChip({ children }: { children: React.ReactNode }) {
   return (
